@@ -1,0 +1,4 @@
+set cpu 256k
+;
+; d debug ff
+b cpu 

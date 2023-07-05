@@ -1,0 +1,1 @@
+make -j i3705 LDFLAGS="-lm -lrt -lpthread -ldl"
