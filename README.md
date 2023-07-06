@@ -2,8 +2,10 @@ There are two main updates with Release 2 of the IBM 3705 SIMH emulator:
 
 1 - The separation of the 3274 emulation code from the 3705 emulation code. 
     This means that the 3274 emulation can run on a different host as the 3705 host.
+
 2 - The addition of BSC support in the form of a 3271 cluster emulation 
     (BSC addition inspired by Mattis Lind) 
+
       
 Below is a detailed overview of the Release 2 updates:
 
