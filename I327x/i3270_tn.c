@@ -322,7 +322,7 @@ BYTE    buf[512];                       /* Receive buffer            */
 /*              P=3270 printer                                       */
 /*      model   3270 model indicator (2,3,4,5,X)                     */
 /*      extatr  3270 extended attributes (Y,N)                       */
-/*      devn    Requested device number, or FFFF=any device number   */
+/*      devn    Requested device number, or FF=any device number     */
 /* Return value:                                                     */
 /*      0=negotiation successful, -1=negotiation error               */
 /*-------------------------------------------------------------------*/
@@ -391,7 +391,7 @@ static BYTE will_naws[] = { IAC, WILL, NAWS };
    /* Check terminal type string for device name suffix */
    s = strchr (termtype, '@');
 
-   if (s != NULL && sscanf (s, "@%hx", &devnum) == 1) {
+   if (s != NULL && sscanf (s, "@%02x", &devnum) == 1) {
       *devn = devnum;
    }
    else {

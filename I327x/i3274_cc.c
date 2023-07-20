@@ -19,7 +19,7 @@
    DEALINGS IN THE SOFTWARE.
    ---------------------------------------------------------------------------
 
-   i3274.c - (C) Copyright 2021 by Edwin Freekenhorst and Henk Stegeman
+   i327x_3274.c - (C) Copyright 2021 by Edwin Freekenhorst and Henk Stegeman
 
    This module simulates an IBM 3274 cluster controller, including
    SNA/SDLC protocol.
@@ -42,7 +42,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <ifaddrs.h>
-#include "i327x.h"
+#include "i327x_327x.h"
 #include "../Include/i327x_sdlc.h"
 #include <errno.h>
 #include <sys/epoll.h>
@@ -77,12 +77,12 @@ char       *ipaddr;
 BYTE       bfr[256];
 
 // Host ---> PU request buffer
-uint8_t BLU_req_buf[16384];         // DLC header + TH + RH + RU + DLC trailer
+uint8_t BLU_req_buf[BUFLEN_3274];   // DLC header + TH + RH + RU + DLC trailer
 int     BLU_req_ptr;                // Offset pointer to BLU
 int     BLU_req_len;                // Length of BLU request
 int     LU_req_stat;                // BLU buffer state
 // PU ---> Host response buffer
-uint8_t BLU_rsp_buf[16384];         // DLC header + TH + RH + RU + DLC trailer
+uint8_t BLU_rsp_buf[BUFLEN_3274];   // DLC header + TH + RH + RU + DLC trailer
 int     BLU_rsp_ptr;                // Offset pointer to BLU
 int     BLU_rsp_len;                // Length of BLU response
 int     BLU_rsp_stat;               // BLU buffer state
@@ -98,8 +98,8 @@ int Plen;                           // Length of PIU response
 struct CB327x* pu2[MAXSNAPU];          /* 3274 data structure */
 struct IO3270 *ioblk[MAXSNAPU][MAXLU]; /* 3270 data buffer */
 
-uint8_t SDLCrspb[65536];
-uint8_t SDLCreqb[65536];
+uint8_t SDLCrspb[BUFLEN_3274];
+uint8_t SDLCreqb[BUFLEN_3274];
 
 void commadpt_read_tty(struct CB327x *i327x, struct IO3270 *ioblk, BYTE * bfr, BYTE lunum, int len);
 int send_packet(int csock, BYTE *buf, int len, char *caption);
@@ -150,6 +150,10 @@ uint8_t F2_BIND_Rsp[] = {
       0x31 };
 uint8_t F2_UNBIND_Rsp[] = {
       0x32 };
+uint8_t F2_UNBIND_Req[] = {
+      0x32,0x01 };
+uint8_t F2_RSHUTD_Req[] = {
+      0xC2 };
 uint8_t F2_SDT_Rsp[]  = {
       0xA0 };
 uint8_t F2_CLEAR_Rsp[] = {
@@ -161,12 +165,18 @@ uint8_t F2_QEC_Rsp[] = {
 uint8_t F2_QC_Rsp[] = {
       0x81 };
 uint8_t F2_INITSELF_Req[] = {
-      0x2C, 0x00, 0x00, 0x02, 0x00, 0x01,  0x0B, 0x80, 0x00,  // TH + RH
+      0x2C, 0x00, 0x00, 0x02, 0x00, 0x01,  0x0B, 0x80, 0x00,
       0x01, 0x06, 0x81, 0x00,  0x40, 0x40, 0x40, 0x40,  // Mode name
       0x40, 0x40, 0x40, 0x40,  0xF3, 0x08, 0x40, 0x40,  // Req id
       0X40, 0x40, 0x40, 0x40,  0x40, 0x40,
       0x00, 0x00, 0x00 };
+uint8_t F2_TERMSELF_Req[] = {
+      0x81, 0x06, 0x83, 0x11, 0x44, 0x10,  0x00, 0x00, 0x01,
+      0xF3, 0x00};
 uint8_t F2_NOTIFY_Req[] = {
+      0x81, 0x06, 0x20,                                 // Notify
+      0x0C, 0x06, 0x03, 0x00,  0x00, 0x00, 0x00, 0x00};
+uint8_t F2_NOTIFY_Req_old[] = {
       0x81, 0x06, 0x20,                                 // Notify
       0x0C, 0x0E, 0x03, 0x00,  0x01, 0x00, 0x00, 0x00,
       0x40, 0x40, 0x40, 0x40,  0x40, 0x40, 0x40, 0x40 };
@@ -217,7 +227,7 @@ int proc_PIU (unsigned char BLU_req_buf[], int BLU_req_len, unsigned char BLU_rs
       } else if ((Fcntl & 0x03) == UNNUM) {              // Unnumbered format ?
          fprintf(T_trace, "PIU0: => Unnumbered format received. \n");
       } else {                                           // Must be a IFRAME with PIU
-         fprintf(T_trace, "PIU0: => Iframe received: BLUlen=%2d, \nPIU0: ", BLU_req_len, Fcntl);
+         fprintf(T_trace, "PIU0: => Iframe received: BLUlen=%2d, \nPIU0: ", BLU_req_len);
          for (s = (char *) &BLU_req_buf[0], i = 0; i < BLU_req_len; ++i, ++s) {
             fprintf(T_trace, "%02X ", (int) *s & 0xFF);
             if ((i + 1) % 16 == 0)
@@ -362,11 +372,15 @@ int proc_PIU (unsigned char BLU_req_buf[], int BLU_req_len, unsigned char BLU_rs
                      /* Send 3270 data response to host */
                      return(BLU_rsp_len);                // Send 3270 response BLU to host
                   } // End if pu2[station]->actlu[k] == 1
-               } else if ((pu2[station]->lu_fd[k] > 0) && (pu2[station]->readylu[k] == 2)) { // End if pu2[station]->lu_fd[k] > 0
-                  /* This section handles a LU "power on" (i.e. 3270 terminal connect)              */
-                  /* A SNA Nofify command with LU "powered on" is send to VTAM                      */
+               } else if (((pu2[station]->lu_fd[k] > 0) && (pu2[station]->readylu[k] == 2)) ||
+                           (pu2[station]->readylu[k] > 2)) { // End if pu2[station]->lu_fd[k] > 0
+                  /* This section handles a LU "power on" (i.e. 3270 terminal connect) or           */
+                  /*  a LU "power off" (i.e. 3270 terminal disconnect)                              */
+                  /* A SNA Nofify command with LU "powered on" is send to VTAM if readylu=2         */
+                  /* A SNA Nofify command with LU "powered off" is send to VTAM if readylu=3        */
+                  /* readylu=3 indicates TN3270 has disconnected, but LU is still active for VTAM   */
                   if (Tdbg_flag == ON)                   // Trace Terminal Controller ?
-                     fprintf(T_trace, "Preparing NOTIFY request\n ");
+                     fprintf(T_trace, "Preparing UNBIND / NOTIFY request\n ");
                   /* Construct 3 byte LH */
                   BLU_rsp_ptr = 0;                       // Reset pointer
                   BLU_rsp_buf[BLU_rsp_ptr++] = 0x7E;     // Bflag
@@ -388,22 +402,41 @@ int proc_PIU (unsigned char BLU_req_buf[], int BLU_req_len, unsigned char BLU_rs
                   BLU_rsp_buf[FD2_RH_0] = 0x00;          //  FM Data (FMD)
                   BLU_rsp_buf[FD2_RH_0] |= 0x08;         // Field formatted RU
                   BLU_rsp_buf[FD2_RH_0] |= 0x03;         // Indicate this is first and last in chain
-                  BLU_rsp_buf[FD2_RH_1] = 0x80;          // We need a response...
-                  pu2[station]->dri[k] = ON;             // ...so remember this
+                  BLU_rsp_buf[FD2_RH_1] = 0x00;          // We do not need a response...
+                  //BLU_rsp_buf[FD2_RH_1] = 0x80;          // We need a response...
+                  //pu2[station]->dri[k] = ON;             // ...so remember this
                   BLU_rsp_buf[FD2_RH_2] = 0x20;          // Indicate Change Direction
                   BLU_rsp_ptr = BLU_rsp_ptr + 6 + 3;     // Update BLU pointer
 
-                  memcpy(&BLU_rsp_buf[BLU_rsp_ptr], F2_NOTIFY_Req, sizeof(F2_NOTIFY_Req)); //
-                  BLU_rsp_ptr = BLU_rsp_ptr + sizeof(F2_NOTIFY_Req);
+                  /* This section handles LU Power On and LU Power off     */
+                  if (pu2[station]->readylu[k] == 4) {  // There is still an activer BIND, so prepare UNBIND
+                    //BLU_rsp_buf[FD2_TH_daf] = pu2[station]->bindflag[k];      //  copy DAF of LU at the other end
+                    BLU_rsp_buf[FD2_TH_daf] = 0x00;                             //  SSCP
+                    memcpy(&BLU_rsp_buf[BLU_rsp_ptr], F2_TERMSELF_Req, sizeof(F2_TERMSELF_Req));
+                    pu2[station]->bindflag[k] = 0;     //  reset bindflag
+                    BLU_rsp_ptr = BLU_rsp_ptr + sizeof(F2_TERMSELF_Req);
+                  } // End  if (pu2[station]->readylu[k] == 4)
+                  if (pu2[station]->readylu[k] == 3)  {  // Power off, no BIND active, so sent NOTIFY for power off
+                    memcpy(&BLU_rsp_buf[BLU_rsp_ptr], F2_NOTIFY_Req, sizeof(F2_NOTIFY_Req)); //
+                    BLU_rsp_buf[FD2_RU_0 + 5] = 0x01;        // indicate Power off.
+                    BLU_rsp_ptr = BLU_rsp_ptr + sizeof(F2_NOTIFY_Req);
+                  } // End if (pu2[station]->readylu[k] == 3)
+                  if (pu2[station]->readylu[k] == 2)  {  // Power on after ACTLU, send NOTIFY for power on
+                    memcpy(&BLU_rsp_buf[BLU_rsp_ptr], F2_NOTIFY_Req, sizeof(F2_NOTIFY_Req)); //
+                    BLU_rsp_buf[FD2_RU_0 + 5] = 0x03;        // indicate Power on.
+                    BLU_rsp_ptr = BLU_rsp_ptr + sizeof(F2_NOTIFY_Req);
+                  } // End if (pu2[station]->readylu[k] == 2)
+                  /*                                      */
                   /* Construct 3 byte LT */
                   BLU_rsp_buf[BLU_rsp_ptr++] = 0x47;     // FCS High
                   BLU_rsp_buf[BLU_rsp_ptr++] = 0x0F;     // FCS Low
                   BLU_rsp_buf[BLU_rsp_ptr++] = 0x7E;     // Eflag
                   BLU_rsp_len = BLU_rsp_ptr;             // Update BLU_rsp_len
-                  if (!(BLU_req_buf[FCntl] & CPoll)) {   // No polling? - Unlikely since this is RR, bt just in case...
+                  if (!(BLU_req_buf[FCntl] & CPoll)) {   // No polling? - Unlikely since this is RR, but just in case...
                      BLU_rsp_stat = FILLED;              // ...Indicate there is data to send.
                   }
-                  pu2[station]->readylu[k] = 1;          // Indicate LU has been powerd on (???)
+                  if (pu2[station]->readylu[k] > 1)
+                     pu2[station]->readylu[k]--;          // Indicate next phase (1 = active, 2 powering on, 3 = powering off, 4 = unbind)
                   /* Cycle through all LU's 1 by 1 to check if there is input. */
                   /* Keep a pointer to the last lu that has been scanned. */
                   /* The next RR will start with the one following the last */
@@ -450,8 +483,8 @@ int proc_PIU (unsigned char BLU_req_buf[], int BLU_req_len, unsigned char BLU_rs
          BLU_rsp_buf[FAddr] = BLU_req_buf[FAddr];        // Sec Station Addr
          BLU_rsp_buf[FCntl] = RNR;
 
-         BLU_rsp_buf[Hfcs]  = 0x47;                      // FCS High
-         BLU_rsp_buf[Lfcs]  = 0x0F;                      // FCS Low
+         BLU_rsp_buf[Hfcs] = 0x47;                       // FCS High
+         BLU_rsp_buf[Lfcs] = 0x0F;                       // FCS Low
          BLU_rsp_buf[EFlag] = 0x7E;                      // Eflag
          BLU_rsp_len = 6;                                // BLU_rsp_len
 
@@ -602,7 +635,8 @@ int proc_PIU (unsigned char BLU_req_buf[], int BLU_req_len, unsigned char BLU_rs
             fflush(T_trace);
          }
          //************************************************************
-         send_packet (pu2[station]->lu_fd[pu2[station]->lu_addr1 - 2], (BYTE *) Dbuf, RU_req_len, "3270 Data");
+         if   (pu2[station]->lu_fd[pu2[station]->lu_addr1 - 2] > 0)
+            send_packet (pu2[station]->lu_fd[pu2[station]->lu_addr1 - 2], (BYTE *) Dbuf, RU_req_len, "3270 Data");
          //************************************************************
 
          //*******************************************************************************************************
@@ -749,7 +783,7 @@ int proc_PIU (unsigned char BLU_req_buf[], int BLU_req_len, unsigned char BLU_rs
          /*** SDT (Start Data Traffic) ***/
          /********************************/
          if (BLU_req_buf[FD2_RU_0] == 0xA0) {
-            /* Save oaf from BIND request */
+            /* Save oaf from SDT request */
             pu2[station]->daf_addr1[pu2[station]->lu_addr1 - 2] = BLU_req_buf[FD2_TH_oaf];
             pu2[station]->lu_lu_seqn[pu2[station]->lu_addr1 - 2] = 0;
             // Copy +SDT to RU.
@@ -847,7 +881,7 @@ int proc_PIU (unsigned char BLU_req_buf[], int BLU_req_len, unsigned char BLU_rs
             memcpy(&BLU_rsp_buf[FD2_RU_0], F2_UNBIND_Rsp, sizeof(F2_UNBIND_Rsp));
 
             BLU_rsp_ptr = BLU_rsp_ptr + sizeof(F2_UNBIND_Rsp);   // Update pointer
-            pu2[station]->readylu[pu2[station]->lunum] = 2;      // Set LU in power off state to force a NOTIFY command.
+            //pu2[station]->readylu[pu2[station]->lunum] = 2;      // Set LU in power off state to force a NOTIFY command.
          }
       }  // End if ((BLU_req_buf[FD2_RH_0] & (unsigned char)0xFC) != 0x00)
 
@@ -903,6 +937,7 @@ int proc_PU2iml() {
       //Init sockets for LU's
       for (BYTE i = 0; i < MAXLU; i++) {
          pu2[j]->lu_fd[i] = 0;
+         pu2[j]->readylu[i] = 0;
       } // End for i = 0
       pu2[j]->lunum = 0;
       pu2[j]->last_lu = 0;
@@ -977,7 +1012,7 @@ int proc_3270 () {
          event_count = epoll_wait(pu2[k]->epoll_fd, events, MAXLU, 50);
          for (int i = 0; i < event_count; i++) {
             if (pu2[k]->lunum != 0xFF) {                                   /* if available LU pool not exhausted      */
-               pu2[k]->readylu[pu2[k]->lunum] = 0;                         /* Indicate LU is not yet ready for action */
+               //pu2[k]->readylu[pu2[k]->lunum] = 0;                         /* Indicate LU is not yet ready for action */
                pu2[k]->lu_fd[pu2[k]->lunum]=accept(pu2[k]->pu_fd, NULL, 0);  /* accept connection request               */
                if (pu2[k]->lu_fd[pu2[k]->lunum] < 1) {
                   printf("\rPU2: accept failed for 3174-%01X %s\n", k, strerror(errno));
@@ -1011,6 +1046,8 @@ int proc_3270 () {
                      pu2[k]->readylu[pu2[k]->lunum] = 2;                  /* Indicate LU is in power off state  */
                   else
                      pu2[k]->readylu[pu2[k]->lunum] = 1;                  /* Indicate LU is ready to go         */
+                  if (Tdbg_flag == ON)    // Trace Terminal Controller ?
+                     fprintf(T_trace, "3274: LU %02X connected, readylu=%d \n", pu2[k]->lunum, pu2[k]->readylu[pu2[k]->lunum]);
                   printf("\rPU2: LU %02X connected to 3274-%01X\n", pu2[k]->lunum, k);
                   //  Find first available LU
                   pu2[k]->lunum = 0xFF;                                   /* preset to no LU's availble         */
@@ -1026,15 +1063,25 @@ int proc_3270 () {
                rc = ioctl(pu2[k]->lu_fd[j], FIONREAD, &pendingrcv);
                if ((pendingrcv < 1) && (SocketReadAct(pu2[k]->lu_fd[j]))) rc = -1;
                if (rc < 0) {
-                  pu2[k]->readylu[j] = 0;                                 /* Indicate LU is not ready for action anymore */
-                  pu2[k]->reqcont[j] = 0;                                 /* Indicate LU ihas not requested contact      */
+                  if (pu2[k]->actlu[j] == 1)  {                           /* Is actlu already done?                                 */
+                      if (pu2[k]->bindflag[j] == 0)                       /* LU has no active BIND                                  */
+                        pu2[k]->readylu[j] = 3;                           /* Indicate LU is in power off state (triggers a NOTIFY)  */
+                     else                                                 /* LU has an active BIND                                  */
+                        pu2[k]->readylu[j] =  4;                          /* Indicate LU is in power off state (triggers an UNBIND) */
+                     }
+                  else {
+                     pu2[k]->readylu[j] = 0;                              /* Indicate LU is not ready for action anymore            */
+                     pu2[k]->actlu[j] = 0;                                /* Indicate ACTLU has not been sent                       */
+                  }
+                  if (Tdbg_flag == ON)    // Trace Terminal Controller ?
+                     fprintf(T_trace, "3274: LU %02X disconnected, readylu=%d \n", j, pu2[k]->readylu[j]);
+                  pu2[k]->reqcont[j] = 0;                                 /* Indicate LU has not requested contact                  */
                   free(ioblk[k][j]);
-                  pu2[k]->actlu[j] = 0;
                   close (pu2[k]->lu_fd[j]);
                   pu2[k]->lu_fd[j] = 0;
                   printf("\rPU2: LU %02X disconnected from 3174-%01X\n\r", j, k);
-                  if ((pu2[k]->lunum > j) || (pu2[k]->lunum == 0xFF))     /* If next available lu greater or no LU's availble... */
-                     pu2[k]->lunum = j;                                   /* ...replace with the just released LU number          */
+                  if ((pu2[k]->lunum > j) || (pu2[k]->lunum == 0xFF))     /* If next available lu greater or no LU's availble...    */
+                     pu2[k]->lunum = j;                                   /* ...replace with the just released LU number            */
                } else {
                   if (pendingrcv > 0) {
                      rc = read(pu2[k]->lu_fd[j], bfr, 256-BUFPD);
@@ -1071,12 +1118,13 @@ void main(int argc, char *argv[]) {
    //pthread_t thread;
    /* Read command line arguments */
    if (argc == 1) {
-      printf("\rPU2: Error - arguments missing(s)!\n");
-      printf("\r     Usage: i3274 [-cchn hostname | -ccip ipaddr]\n");
-      printf("\r                  [-d]\n\n");
-      return;
+      printf("PU2: Error - Arguments missing\n\r");
+      printf("\r   Valid arguments are:\n");
+      printf("\r   -cchn {hostname}  : hostname of host running the 3705\n");
+      printf("\r   -ccip {ipaddress} : ipaddress of host running the 3705 \n");
+      printf("\r   -d : switch debug on  \n");
+   return;
    }
-
    Tdbg_flag = OFF;
    i = 1;
    while (i < argc) {
@@ -1103,9 +1151,11 @@ void main(int argc, char *argv[]) {
          i = i + 2;
          continue;
       } else {
-         printf("\rPU2: Error - invalid argument %s !\n", argv[i]);
-         printf("\r     Usage: i3274 [-cchn hostname | -ccip ipaddr]\n");
-         printf("\r                  [-d]\n\n");
+         printf("\rPU2: invalid argument %s\n",argv[i]);
+         printf("\r     Valid arguments are:\n");
+         printf("\r      -cchn {hostname}  : hostname of host running the 3705\n");
+         printf("\r      -ccip {ipaddress} : ipaddress of host running the 3705 \n");
+         printf("\r      -d : switch debug on  \n");
          return;
       }  // End else
    }  // End while
@@ -1175,8 +1225,7 @@ void main(int argc, char *argv[]) {
                if (pu2[station]->seq_Nr == 8) pu2[station]->seq_Nr = 0;
                if (Tdbg_flag == ON)
                   fprintf(T_trace, "\r3274 LH receive sequence count=%d, Fcntl=%02X\n", pu2[station]->seq_Nr, SDLCreqb[FCntl]);
-            }  // End if SDLCreqb[FCntl]
-
+            }  //End if SDLCreqb[FCntl]
             SDLCrspl = proc_PIU(SDLCreqb, SDLCreql, &SDLCrspb[SDLCrsptl]);
             if (SDLCrspl > 0) {
                Fptr2[FptrI] =  SDLCrsptl;
@@ -1185,7 +1234,6 @@ void main(int argc, char *argv[]) {
                FptrI++;
                Fptr2[FptrI] =  0;
             }  // End if SDLCrspl
-
             SDLCrsptl = SDLCrsptl + SDLCrspl;
             if (Tdbg_flag == ON)
                fprintf(T_trace, "\r3274 Total response length: %d\n", SDLCrsptl);
@@ -1199,7 +1247,7 @@ void main(int argc, char *argv[]) {
                   if ((SDLCrspb[Fptr+FCntl] & 0x03) == SUPRV) {      // Supervisory format ?
                      SDLCrspb[Fptr+FCntl] = (SDLCrspb[Fptr+FCntl] & 0x1F) | (pu2[station]->seq_Nr << 5);  // Insert receive sequence
                   }
-                  if  ((SDLCrspb[Fptr + FCntl] & 0x01) == IFRAME) {
+                  if  ((SDLCrspb[Fptr+FCntl] & 0x01) == IFRAME) {
                      // Insert receive and send sequence numbers into the Frame Control byte of the response
                      SDLCrspb[Fptr+FCntl] = (SDLCrspb[Fptr+FCntl] & 0x1F) | (pu2[station]->seq_Nr << 5);  // Insert receive sequence
                      SDLCrspb[Fptr+FCntl] = (SDLCrspb[Fptr+FCntl] & 0xF1) | (pu2[station]->seq_Ns << 1);  // Insert send sequence
