@@ -238,7 +238,7 @@ void *BSC_thread(void *arg)
    char   *ipaddr;
    struct epoll_event event, events[MAXBSCLINES];
 
-   printf("\rBSC: Thread %d started succesfully...\n", syscall(SYS_gettid));
+   printf("\rBSC: Thread %ld started succesfully...\n", syscall(SYS_gettid));
 
    for (int j = 0; j < MAXBSCLINES; j++) {
       bscline[j] =  malloc(sizeof(struct BSCLine));

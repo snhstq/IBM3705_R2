@@ -442,7 +442,7 @@ void exec_attn() {
       // Send CA retun status to host
       send_carnstat(iobs[j]->tag_socket[iobs[j]->abswitch], &carnstat, &ackbuf, iobs[j]->CA_id);
    } else {
-      printf("CA%c: Channel not active, ATTN not send \n\r");
+      printf("CA%c: Channel not active, ATTN not send \n\r", iobs[j]->CA_id);
    }
    return;
 }

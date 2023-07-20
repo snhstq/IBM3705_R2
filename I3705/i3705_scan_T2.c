@@ -410,7 +410,7 @@ void *CS2_thread(void *arg) {
                   break;
                if (icw_lcd[t] == 0xC) {        // BSC EBCDIC
                   if ((Sdbg_flag == ON) && (Sdbg_reg & 0x02))
-                     fprintf (trace, "SCAN: icw_pdf=%02X icw_scf=%02X lvl=%d\n", 0xff & icw_pdf[t], 0xff & icw_scf[t]);
+                     fprintf (trace, "SCAN: icw_pdf=%02X icw_scf=%02X lvl=%d\n", 0xff & icw_pdf[t], 0xff & icw_scf[t], lvl);
                   if ((icw_scf[t]&0x40) == 0) {   // New char avail to xmit ?
                      transmitChar = icw_pdf[t];
                      if ((Sdbg_flag == ON) && (Sdbg_reg & 0x02)) {   // Trace scanner activities ?
@@ -449,7 +449,7 @@ void *CS2_thread(void *arg) {
                   break;
                if (icw_lcd[t] == 0xC) {        // BSC EBCDIC
                   if ((Sdbg_flag == ON) && (Sdbg_reg & 0x02))
-                     fprintf (trace, "SCAN: icw_pdf=%02X icw_scf=%02X lvl=%d\n", 0xff & icw_pdf[t], 0xff & icw_scf[t]);
+                     fprintf (trace, "SCAN: icw_pdf=%02X icw_scf=%02X lvl=%d\n", 0xff & icw_pdf[t], 0xff & icw_scf[t], lvl);
                   if ((icw_scf[t]&0x40) == 0) {   // New char avail to xmit ?
                      transmitChar = icw_pdf[t];
                      if ((Sdbg_flag == ON) && (Sdbg_reg & 0x02)) {   // Trace scanner activities ?

@@ -217,7 +217,7 @@ t_stat printf_sym (FILE *of, char *strg, t_addr addr, uint32 *val,
 {
 int32 c1, c2, group, inst;
 int32 oplen, i, j;
-char  bld[128], bldaddr[36], bldregs[80];
+char  bld[128], bldaddr[38], bldregs[160];
 int32 blk[16], blt[16];
 int32 blkadd;
 

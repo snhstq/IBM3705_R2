@@ -42,7 +42,6 @@
 #include <arpa/inet.h>
 
 #define MAXSDLCLINES     2             /* Maximum of lines          */
-#define BUFLEN_3274     65536          /* 3274 Send/Receive buffer  */
 #define LINEBASE        20             /* SDLC lines start at 20    */
 
 
@@ -62,12 +61,12 @@ extern uint16_t Sdbg_reg;
 extern uint16_t Sdbg_flag;
 
 // Host ---> PU request buffer
-extern uint8 BLU_req_buf[16384];       // DLC header + TH + RH + RU + DLC trailer
+extern uint8 BLU_req_buf[BUFLEN_3274]; // DLC header + TH + RH + RU + DLC trailer
 extern int   BLU_req_ptr;              // Offset pointer to BLU
 extern int   BLU_req_len;              // Length of BLU request
 extern int   BLU_req_stat;             // BLU buffer state
 // PU ---> Host response buffer
-extern uint8 BLU_rsp_buf[16384];       // DLC header + TH + RH + RU + DLC trailer
+extern uint8 BLU_rsp_buf[BUFLEN_3274]; // DLC header + TH + RH + RU + DLC trailer
 extern int   BLU_rsp_ptr;              // Offset pointer to BLU
 extern int   BLU_rsp_len;              // Length of BLU response
 extern int   BLU_rsp_stat;             // BLU buffer state
@@ -289,7 +288,7 @@ void *SDLC_thread(void *arg) {
    char   *ipaddr;
    struct epoll_event event, events[MAXSDLCLINES];
 
-   printf("\rSDLC: Thread %d started succesfully... \n", syscall(SYS_gettid));
+   printf("\rSDLC: Thread %ld started succesfully... \n", syscall(SYS_gettid));
 
    for (int j = 0; j < MAXSDLCLINES; j++) {
       sdlcline[j] = malloc(sizeof(struct SDLCLine));
