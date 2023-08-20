@@ -104,11 +104,14 @@ struct IO3705 {
    int CA_active;
    int CA_socket[2];
    uint16_t CA_mask;
+   int32 Eregs_Inp[128];
+   int32 Eregs_Out[128];
    int addrlen[MAXCHAN*2];   // Two ports per channel (A/B)
    int bus_socket[2];
    int tag_socket[2];
    int abswitch;             // A/B switch
    int abswhist;             // A/B switch history
+   int diag;                 // Diagnostic status
    uint16_t devnum;
    uint8_t buffer[1024];     // Input buffer of 1K
    uint32_t bufferl;         // Received data length

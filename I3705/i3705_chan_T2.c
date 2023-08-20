@@ -1,4 +1,4 @@
-/* Copyright (c) 2022, Henk Stegeman and Edwin Freekenhorst
+/* Copyright (c) 2022,2023,  Edwin Freekenhorst and Henk Stegeman
 
    Permission is hereby granted, free of charge, to any person obtaining a
    copy of this software and associated documentation files (the "Software"),
@@ -81,7 +81,8 @@ uint16_t Adbg_reg = 0x00;    // Bit flags for debug/trace
 uint16_t Adbg_flag = OFF;    // 1 when Atrace.log open
 FILE  *A_trace;
 
-void *CAx_thread(void *arg);
+void *CA1_thread(void *arg);
+void *CA2_thread(void *arg);
 
 uint16_t CAPORTS[MAXCHAN][2] = {{37051, 37052}, {37053, 37054}};  // 3705 supports 2 channels
 uint16_t CAMASKS[MAXCHAN] = {0x0008, 0x0020};                     // 3705 supports 2 channels
@@ -100,26 +101,18 @@ extern pthread_mutex_t r77_lock;
 
 void exec_attn();
 void exec_pci();
-void exec_ccw(struct IO3705 *iob);
-int reg_bit(int reg, int bit_mask);
+void exec_ccw(struct IO3705 *iob, int CAid);
+int Oreg_bit(int reg, int bit_mask, int CAid);
 int Ireg_bit(int reg, int bit_mask);
 void wait();
 
-struct CCW {    /* Channel Command Word */
-   uint8_t  code;
-   uint8_t  dataddress[3];
-   uint8_t  flags;
-   uint8_t  chain;           // Format 0. Chain is not correct (yet), but aligned to Hercules
-   uint16_t count;
-} ccw;
-
-struct CSW {    /* Channel Status Word */
-   uint8_t  key;
-   uint8_t  dataddress[3];
-   uint8_t  unit_conditions;
-   uint8_t  channel_conditions;
-   uint16_t count;
-} csw;
+//struct CSW {    /* Channel Status Word */
+//   uint8_t  key;
+//   uint8_t  dataddress[3];
+//   uint8_t  unit_conditions;
+//   uint8_t  channel_conditions;
+//   uint16_t count;
+//} csw;
 
 struct IO3705*  iobs[MAXCHAN];  /* IBM 3705 I/O Block pointer array */
 
@@ -161,12 +154,15 @@ void print_regs(struct IO3705 *iob, char *text) {
       fprintf(A_trace, "     x'50' x'51' x'52' x'53' x'54' x'55' x'56' x'57' x'58' x'59' x'5A' x'5B' x'5C' \n\r");
       fprintf(A_trace, "In : ");
       for (uint8_t h = 0x50; h <= 0x5C; h++) {
-         fprintf(A_trace, "%04X  ", Eregs_Inp[h] );
+         fprintf(A_trace, "%04X  ", iob->Eregs_Inp[h] );
       }
       fprintf(A_trace, "\n\r");
       fprintf(A_trace, "Out: ");
       for (uint8_t h = 0x50; h <= 0x5B; h++) {
-         fprintf(A_trace, "%04X  ", Eregs_Out[h] );
+         if (h == 0x57)
+            fprintf(A_trace, "%04X  ", Eregs_Out[h] );
+         else
+            fprintf(A_trace, "%04X  ", iob->Eregs_Out[h] );
       }
       fprintf(A_trace, "\n\r");
       fprintf(A_trace, "************************************************************************************\n\r");
@@ -262,7 +258,7 @@ int host_connect(struct IO3705 *iob, int abport) {
 // ************************************************************
 // Function to send CA return status to the host
 // ************************************************************
-void send_carnstat(int sockptr, char *carnstat, uint8_t *ackbuf, char CA_id) {
+void send_carnstat(int sockptr, char *carnstat, uint8_t *ackbuf, int CAid) {
    int rc, retry;                  // Return code
 
    while (Ireg_bit(0x77, 0x0028) == ON)
@@ -270,32 +266,34 @@ void send_carnstat(int sockptr, char *carnstat, uint8_t *ackbuf, char CA_id) {
 
    // If DE and CE and reset Write Break Remember and Channel Active
    if (*carnstat & CSW_DEND) {
-      Eregs_Inp[0x55] &= ~0x0040;  // Reset Write Break Remember
-      Eregs_Inp[0x55] &= ~0x0100;  // Reset Channel Active
+      iobs[CAid]->Eregs_Inp[0x55] &= ~0x0040;  // Reset Write Break Remember
+      iobs[CAid]->Eregs_Inp[0x55] &= ~0x0100;  // Reset Channel Active
       *carnstat |= CSW_CEND;       // CA sets channel end
    }
    // If CE...
    if (*carnstat & CSW_CEND)
-      Eregs_Inp[0x55] &= ~0x4000;  // Reset zero override flag
+      iobs[CAid]->Eregs_Inp[0x55] &= ~0x4000;  // Reset zero override flag
 
    if ((Adbg_flag == ON) && (Adbg_reg & 0x01))    // Trace channel adapter activities ?
-      fprintf(A_trace, "CA%c: CARNSTAT %02X via socket %d\n\r", CA_id, *carnstat, sockptr);
+      fprintf(A_trace, "CA%c: CARNSTAT %02X via socket %d\n\r", iobs[CAid]->CA_id, *carnstat, sockptr);
    if (sockptr != -1) {
       rc = send(sockptr, carnstat, 1, 0);
    if ((Adbg_flag == ON) && (Adbg_reg & 0x01))    // Trace channel adapter activities ?
-         fprintf(A_trace, "CA%c: Send %d bytes on socket %d\n\r", CA_id, rc, sockptr);
+         fprintf(A_trace, "CA%c: Send %d bytes on socket %d\n\r", iobs[CAid]->CA_id, rc, sockptr);
    } else
       rc = -1;
 
    if (rc < 0) {
-      printf("\nCA%c: CA status send to host failed...\n\r", CA_id);
+      printf("\nCA%c: CA status send to host failed...\n\r", iobs[CAid]->CA_id);
       return;
    }
-   Eregs_Out[0x54] &= ~0xFFFF;                      // Reset CA status bytes
-   if (CA_id == '1')
-      Eregs_Inp[0x55] &= ~0x0101;                   // Reset CA Active and CA 1 selected
-   else
-      Eregs_Inp[0x55] &= ~0x0102;                   // Reset CA Active  and CA 2 selected
+   //iobs[CAid]->Eregs_Out[0x54] &= ~0xFFFF;            // Reset CA status bytes
+   //if (iobs[CAid]->CA_id == '1')
+     //iobs[CAid]->Eregs_Inp[0x55] &= ~0x0101;        // Reset CA Active and CA 1 selected
+  //   iobs[CAid]->Eregs_Inp[0x55] &= ~0x0100;        // Reset CA Active
+  // else
+      //iobs[CAid]->Eregs_Inp[0x55] &= ~0x0102;       // Reset CA Active  and CA 2 selected
+  //    iobs[CAid]->Eregs_Inp[0x55] &= ~0x0100;       // Reset CA Active
    return;
 }  // end function send_carnstat
 
@@ -412,35 +410,30 @@ void start_listen(struct IO3705 *iob, int abport) {
 // ************************************************************
 // Function for sending Attention interrupts to the host
 // ************************************************************
-void exec_attn() {
-   int rc, j;
+void exec_attn(int j) {
+   int rc;
    uint8_t carnstat;
    uint8_t ackbuf;
    ackbuf = 0x00;
 
-   // Determine which CA needs to react
-   if (Eregs_Out[0x57] & 0x0008)
-      j = 0;
-   else
-      j = 1;
    if ((Adbg_flag == ON) && (Adbg_reg & 0x01))       // Trace channel adapter activities ?
-      fprintf(A_trace, "CA%c: L3 register 55 %04X \n\r", iobs[j]->CA_id, Eregs_Out[0x55]);
-   Eregs_Inp[0x55] |= 0x0200;                        // Set Attention Request
+      fprintf(A_trace, "CA%c: L3 register 55 %04X \n\r", iobs[j]->CA_id, iobs[j]->Eregs_Out[0x55]);
+   iobs[j]->Eregs_Inp[0x55] |= 0x0200;               // Set Attention Request
    pthread_mutex_lock(&r77_lock);
    Eregs_Inp[0x77] |= iobs[j]->CA_mask;              // Set CA1 L3 Interrupt Request
    pthread_mutex_unlock(&r77_lock);
    CA1_IS_req_L3 = ON;
    while (Ireg_bit(0x77, iobs[j]->CA_mask) == ON)
       wait();
-   Eregs_Out[0x55] &= ~0x0200;                       // Reset attention request
+   iobs[j]->Eregs_Out[0x55] &= ~0x0200;                       // Reset attention request
    print_regs(iobs[j], "ATTN");
-   carnstat = (carnstat &0x00) | CSW_ATTN;           // Set ATTN CA return status
+   carnstat = (carnstat & 0x00) | CSW_ATTN;           // Set ATTN CA return status
    //carnstat = ((Eregs_Out[0x54] >> 8 ) & 0x00FF);  // Get CA return status
    if (iobs[j]->CA_active == TRUE) {
       if ((Adbg_flag == ON) && (Adbg_reg & 0x01))    // Trace channel adapter activities ?
           fprintf(A_trace, "CA%c: Sending ATTN\n\r", iobs[j]->CA_id);
       // Send CA retun status to host
-      send_carnstat(iobs[j]->tag_socket[iobs[j]->abswitch], &carnstat, &ackbuf, iobs[j]->CA_id);
+      send_carnstat(iobs[j]->tag_socket[iobs[j]->abswitch], &carnstat, &ackbuf, j);
    } else {
       printf("CA%c: Channel not active, ATTN not send \n\r", iobs[j]->CA_id);
    }
@@ -448,21 +441,16 @@ void exec_attn() {
 }
 
 // ************************************************************
-// Function for requisting a L3 int from the control program
+// Function for requesting a L3 int from the control program
 // ************************************************************
-void exec_pci() {
-   int j;
-      // Determine which CA needs to react
-      if (Eregs_Out[0x57] & 0x0008)
-         j = 0;
-      else
-         j = 1;
-      if ((Adbg_flag == ON) && (Adbg_reg & 0x01))    // Trace channel adapter activities ?
-         fprintf(A_trace, "CA%c: L3 register 57 %04X \n\r", iobs[j]->CA_id, Eregs_Out[0x57]);
+void exec_pci(int j) {
+   int bitsave;
+      print_regs(iobs[j], "PCI Request");
       while (Ireg_bit(0x77, iobs[j]->CA_mask) == ON)
          wait();
-      Eregs_Inp[0x55] |= 0x0800;                     // Set Program Requested L3 interrupt
-      Eregs_Out[0x55] |= 0x3000;                     // Set INCWAR and OUTCWAR valid for IPL
+      bitsave = iobs[j]->Eregs_Out[0x55] & 0x3000;   // Save INCWAR and OUTCWAR bits;
+      iobs[j]->Eregs_Inp[0x55] |= 0x0800;            // Set Program Requested L3 interrupt
+      //iobs[j]->Eregs_Out[0x55] |= 0x3000;            // Set INCWAR and OUTCWAR valid for IPL
       pthread_mutex_lock(&r77_lock);
       Eregs_Inp[0x77] |= iobs[j]->CA_mask;           // Set CA L3 interrupt request
       pthread_mutex_unlock(&r77_lock);
@@ -472,25 +460,37 @@ void exec_pci() {
       while (Ireg_bit(0x77, iobs[j]->CA_mask) == ON) wait();
          wait();
       Eregs_Out[0x57] &= ~0x0080;                    // Reset L3 request
+      print_regs(iobs[j], "PCI Request completed");
+      iobs[j]->Eregs_Out[0x55] |= bitsave;           //Restore INCWAR and OUTCWAR bits;
    return;
 }
 
 // ************************************************************
 // Function for handling diagnostic wrap mode
 // ************************************************************
-void exec_diag() {
-         printf("CA: 3705 Diagnostic request \n\r");
+void exec_diag(int j) {
       // Determine if diagnstic mode needs to be set
-      if ((Eregs_Out[0x57] & 0x0001) && !(Eregs_Inp[0x55] & 0x8000))  {
-         Eregs_Inp[0x55] |= 0x8000;           // Diagnostic wrap mode on
+      if ((Eregs_Out[0x57] & 0x0001) && !(iobs[j]->Eregs_Inp[0x55] & 0x8000))  {
+         iobs[j]->Eregs_Inp[0x55] |= 0x8000;    // Diagnostic wrap mode on
+         iobs[j]->Eregs_Inp[0x55] &= ~0x0100;   // CA not active
          //iob->CA_active = FALSE;              // set CA to inactive
-         printf("CA: 3705 Diagnostic mode turned on\n\r");
+         iobs[j]->Eregs_Inp[0x58] &= ~0x000C;   // Switch A and B offline
+         if (!iobs[j]->diag)
+            printf("\nCA%c: 3705 Diagnostic mode turned on\n\r",iobs[j]->CA_id);
+         iobs[j]->diag = 1;
       }
       // Determine if diagnstic mode needs to be turned off
-      if ((Eregs_Out[0x57] & 0x0000) && (Eregs_Inp[0x55] & 0x8000))  {
-         Eregs_Inp[0x55] &= ~0x8000;           // Diagnostic wrap mode off
+      if (!(Eregs_Out[0x57] & 0x0001) && (iobs[j]->Eregs_Inp[0x55] & 0x8000))  {
+         iobs[j]->Eregs_Inp[0x55] &= ~0x8000;     // Diagnostic wrap mode off
+         //iobs[j]->Eregs_Inp[0x55] |= 0x0100;      // CA active
          //iob->CA_active = TRUE  ;              // set CA to active
-         printf("CA: 3705 Diagnostic mode turned off\n\r");
+         if (iobs[j] == 0)
+            iobs[j]->Eregs_Inp[0x58] |= 0x0008;   // Switch A  onfline
+         else
+            iobs[j]->Eregs_Inp[0x58] |= 0x0004;   // Switch B  onfline
+         if (iobs[j]->diag)
+            printf("\nCA%c: 3705 Diagnostic mode turned off\n\r",iobs[j]->CA_id);
+         iobs[j]->diag = 0;
       }
    return;
 }
@@ -500,7 +500,6 @@ void exec_diag() {
 // ********************************************************************
 void *CA_T2_thread(void *arg) {
    int rc, sig, event_count;
-   uint32_t CAx_tid[2];
    struct sockaddr_in address;
    typedef union epoll_data {
       void    *ptr;
@@ -539,6 +538,7 @@ void *CA_T2_thread(void *arg) {
       iobs[i]->abswhist = CAB;             // This forces a listen on CAx port A
       iobs[i]->CA_mask = CAMASKS[i];       // Mask to enable port A
       iobs[i]->chainbl = 0;                // Initial chain data buffer length=0
+      iobs[i]->diag = 0;                   // Diagnostic off
    }
 
    epoll_fd = epoll_create(10);
@@ -547,9 +547,14 @@ void *CA_T2_thread(void *arg) {
       return 0;
    }
 
-   rc = pthread_create(&id1, NULL, CAx_thread, NULL);
+   rc = pthread_create(&id1, NULL, CA1_thread, NULL);
    if (rc  != 0) {
-      printf("\nCA_T2: Adapter thread creation failed with rc = %d \n\r", rc);
+      printf("\nCA1: Adapter thread creation failed with rc = %d \n\r", rc);
+      return 0;
+   }  // End if rc !=0
+   rc = pthread_create(&id2, NULL, CA2_thread, NULL);
+   if (rc  != 0) {
+      printf("\nCA2: Adapter thread creation failed with rc = %d \n\r", rc);
       return 0;
    }  // End if rc !=0
 
@@ -619,25 +624,26 @@ void *CA_T2_thread(void *arg) {
 }
 
 // ************************************************************
-// The channel adaptor hardware emulation thread starts here...
+// The channel adaptor 1 hardware emulation thread starts here...
 // ************************************************************
 /* Function to be run as a thread always must have the same
    signature: it has one void* parameter and returns void    */
-void *CAx_thread(void *arg) {
+void *CA1_thread(void *arg) {
 
    int  pendingrcv;
+   int  CAid = 0;
 
-   printf("\nCA: Adapter thread %d started sucessfully... \n\r", getpid());
+   printf("\nCA%d: Adapter thread %d started sucessfully... \n\r", CAid+1, getpid());
 
    pthread_mutex_lock(&r77_lock);
    CA1_DS_req_L3 = OFF;                    // Chan Adap Data/Status request flag
    CA1_IS_req_L3 = OFF;                    // Chan Adap Initial Sel request flag
-   Eregs_Inp[0x77] &= ~0x0028;             // Reset CA L3 interrupt
+   Eregs_Inp[0x77] &= ~0x0008;             // Reset CA L3 interrupt
    pthread_mutex_unlock(&r77_lock);
-   Eregs_Inp[0x55]  = 0x0000;              // Reset CA control register
-   Eregs_Inp[0x58] |= 0x0008;              // Enable CA I/F A
-   Eregs_Inp[0x55] |= 0x0010;              // Flag System Reset
-   Eregs_Inp[0x53] |= 0x0200;              // Set not initialized on (in)
+   iobs[CAid]->Eregs_Inp[0x55]  = 0x0000;  // Reset CA control register
+   iobs[CAid]->Eregs_Inp[0x58] |= 0x0008;  // Enable CA I/F A
+   iobs[CAid]->Eregs_Inp[0x55] |= 0x0010;  // Flag System Reset
+   iobs[CAid]->Eregs_Inp[0x53] |= 0x0200;  // Set not initialized on
    Eregs_Inp[0x76] |= 0x0400;              // Set CA L1 interrupt
 
 
@@ -650,30 +656,107 @@ void *CAx_thread(void *arg) {
       /*  Channel status tests need to be added                      */
       /*                                                             */
       /***************************************************************/
-      for (int j = 0; j < MAXCHAN; j++) {
-         if (Eregs_Out[0x55] & 0x0200) {                 // ATTN request ?
-            // Execute ATTN request
-            exec_attn();
-         }
-         if (Eregs_Out[0x57] & 0x0080) {                 // PCI request ?
+         // Check for Diagnostic mode
+         exec_diag(CAid);
+         // Check for PCI request
+         if ((Eregs_Out[0x57] & 0x0008) && (Eregs_Out[0x57] & 0x0080) &&     // PCI request for CA1?
+            !(iobs[CAid]->Eregs_Inp[0x55] & 0x0100)) {
             // Execute pci request
-            exec_pci();
+            exec_pci(CAid);
          }
-         if (iobs[j]->CA_active == TRUE) {
-            pendingrcv = 0;
-            ioctl(iobs[j]->bus_socket[iobs[j]->abswitch], FIONREAD, &pendingrcv);
-            if (pendingrcv > 0) {
-               exec_ccw(iobs[j]);
-            }  // End if pendingrcv
+         // Check for ATTN request
+         if ((Eregs_Out[0x57] & 0x0008) && (iobs[CAid]->Eregs_Out[0x55] & 0x0200)) {  // ATTN request for CA1?
+            // Execute ATTN request
+            exec_attn(CAid);
+         }
+         // Check for Channel activity
+         if (iobs[CAid]->CA_active == TRUE) {
+            do {
+               pendingrcv = 0;
+               ioctl(iobs[CAid]->bus_socket[iobs[CAid]->abswitch], FIONREAD, &pendingrcv);
+               if (pendingrcv > 0) {
+                  exec_ccw(iobs[CAid],CAid);
+                  }  // End if pendingrcv
+               } // end do while
+
+            while (pendingrcv != 0);
          }  // End if iobs[j]
-      }  // End for int j
+   }  // End of while(1)... */
+}
+
+// ************************************************************
+// The channel adaptor 2 hardware emulation thread starts here...
+// ************************************************************
+/* Function to be run as a thread always must have the same
+   signature: it has one void* parameter and returns void    */
+void *CA2_thread(void *arg) {
+
+   int  pendingrcv;
+   int  CAid = 1;
+
+   printf("\nCA%d: Adapter thread %d started sucessfully... \n\r", CAid+1, getpid());
+
+   pthread_mutex_lock(&r77_lock);
+   CA1_DS_req_L3 = OFF;                    // Chan Adap Data/Status request flag
+   CA1_IS_req_L3 = OFF;                    // Chan Adap Initial Sel request flag
+   Eregs_Inp[0x77] &= ~0x0020;             // Reset CA L3 interrupt
+   pthread_mutex_unlock(&r77_lock);
+   iobs[CAid]->Eregs_Inp[0x55]  = 0x0000;  // Reset CA control register
+   iobs[CAid]->Eregs_Inp[0x58] |= 0x0008;  // Enable CA I/F A
+   iobs[CAid]->Eregs_Inp[0x55] |= 0x0010;  // Flag System Reset
+   iobs[CAid]->Eregs_Inp[0x53] |= 0x0200;  // Set not initialized on (in)
+   //Eregs_Inp[0x76] |= 0x0200;              // Set CA L1 interrupt
+
+
+   while(1) {
+      // We do this for ever and ever...
+      /***************************************************************/
+      /*  Read channel command from host                             */
+      /*                                                             */
+      /*  This is the raw version: it assumes no pending operation   */
+      /*  Channel status tests need to be added                      */
+      /*                                                             */
+      /***************************************************************/
+         // Check for Diagnostic mode
+         exec_diag(CAid);
+         // Check for PCI request
+         if (!(Eregs_Out[0x57] & 0x0008) && (Eregs_Out[0x57] & 0x0080) &&     // PCI request for CA2?
+            !(iobs[CAid]->Eregs_Inp[0x55] & 0x0100)) {
+            // Execute pci request
+            exec_pci(CAid);
+         }
+         // Check for ATTN request
+         if (!(Eregs_Out[0x57] & 0x0008) && (iobs[CAid]->Eregs_Out[0x55] & 0x0200)) {  // ATTN request for CA2?
+            // Execute ATTN request
+            exec_attn(CAid);
+         }
+         // Check for Channel activity
+         if (iobs[CAid]->CA_active == TRUE) {
+            do {
+               pendingrcv = 0;
+               ioctl(iobs[CAid]->bus_socket[iobs[CAid]->abswitch], FIONREAD, &pendingrcv);
+               if (pendingrcv > 0) {
+                  exec_ccw(iobs[CAid],CAid);
+                  }  // End if pendingrcv
+               }  // end do while
+            while (pendingrcv != 0);
+         }  // End if iobs[j]
    }  // End of while(1)... */
 }
 
 // ************************************************************
 // Function to execute Channel Command Words.
 // ************************************************************
-void exec_ccw(struct IO3705 *iob) {
+void exec_ccw(struct IO3705 *iob, int CAid) {
+
+   struct CCW {               /* Channel Command Word */
+      uint8_t code;
+      uint8_t dataddress[3];
+      uint8_t flags;
+      uint8_t chain;         // Format 0. Chain is not correct (yet), but aligned to Hercules
+      uint16_t count;
+   } ccw;
+
    int rc, i;
    int cc = 0;
    int sockfc = -1;
@@ -719,9 +802,9 @@ void exec_ccw(struct IO3705 *iob) {
       ccw.chain =  iob->buffer[5];
       ccw.count = (iob->buffer[6] << 8) | iob->buffer[7];
 
-      Eregs_Inp[0x5A] = ccw.code << 8;                   // Set Chan command in CA Data Buffer
-      Eregs_Inp[0x5C] &= ~0xFFFF;                        // Clear command flags CA Command Register
-      Eregs_Inp[0x55] &= ~0x0800;                        // Program Requested L3 interrupt flag should be off
+      iob->Eregs_Inp[0x5A] = ccw.code << 8;              // Set Chan command in CA Data Buffer
+      iob->Eregs_Inp[0x5C] &= ~0xFFFF;                   // Clear command flags CA Command Register
+      iob->Eregs_Inp[0x55] &= ~0x0800;                   // Program Requested L3 interrupt flag should be off
       if ((Adbg_flag == ON) && (Adbg_reg & 0x01))        // Trace channel adapter activities ?
          fprintf(A_trace, "\nCA%c: Channel Command: %02X, length: %d, Flags: %02X, Chained: %02X \n\r",
              iob->CA_id, ccw.code, ccw.count, ccw.flags, ccw.chain);
@@ -731,31 +814,36 @@ void exec_ccw(struct IO3705 *iob) {
       // **************************************************************
       switch (ccw.code) {
          case 0x00:       // Test I/O
-            Eregs_Inp[0x5C] |= 0x8000;                   // Set CA Command Register
+            iob->Eregs_Inp[0x5C] |= 0x8000;              // Set CA Command Register
             // Send channel end and device end to the host. Sufficient for now (might need to send x00).
             // Send CA return status to host
-            carnstat = ((Eregs_Out[0x54] >> 8 ) & 0x00FF);  // Get CA return status
-            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, iob->CA_id);
+            carnstat = ((iob->Eregs_Out[0x54] >> 8 ) & 0x00FF);  // Get CA return status
+            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, CAid);
             break;
 
          case 0x02:       // Read
-            Eregs_Inp[0x55] |= 0x0100;                   // Set Channel Active
-            Eregs_Inp[0x5C] |= 0x2000;                   // Set CA Command Register
-            Eregs_Inp[0x53] &= 0x00FF;                   // Reset sense byte (in)
-            Eregs_Out[0x53] &= 0x00FF;                   // Reset sense byte (out)
+            print_regs(iob, "CCW 2 Entry");
+            //while (iobs[abs(CAid-1)]->Eregs_Inp[0x55] & 0x0100)
+            //   wait();
+            if ((Adbg_flag == ON) && (Adbg_reg & 0x01))   // Trace channel adapter activities ?
+               fprintf(A_trace, "CA%d continues, CA%d not active\n\r",CAid+1,abs(CAid-1)+1);
+            iob->Eregs_Inp[0x55] |= 0x0100;              // Set Channel Active
+            iob->Eregs_Inp[0x5C] |= 0x2000;              // Set CA Command Register
+            iob->Eregs_Inp[0x53] &= 0x00FF;              // Reset sense byte (in)
+            iob->Eregs_Out[0x53] &= 0x00FF;              // Reset sense byte (out)
 
-            while (reg_bit(0x55, 0x1000) == OFF)
+            while (Oreg_bit(0x55, 0x1000,CAid) == OFF)
                wait();                                   // Wait for OUTCWAR to become valid
             bufbase = 0;                                 // Set buffer base...
             wdcnttot = 0;                                // ... we will need this in case of chaining
 
             do {   // While condition remains 0
                condition = 0;
-               outcwar = Eregs_Out[0x51];
+               outcwar = iob->Eregs_Out[0x51];
                cacw1 = (M[outcwar] << 8) | M[outcwar+1] & 0x00FF;      // Get first half of CA Control word
                wdcnt = (cacw1 >> 2) & 0x03FF;            // Fetch Counter
-               Eregs_Inp[0x52] &= 0x0000;                // Clear Byte Count Register
-               Eregs_Inp[0x52] = wdcnt;
+               iob->Eregs_Inp[0x52] &= 0x0000;           // Clear Byte Count Register
+               iob->Eregs_Inp[0x52] = wdcnt;
 
                // Get data fetch address
                cacw2 = 0;
@@ -763,10 +851,10 @@ void exec_ccw(struct IO3705 *iob) {
                if ((Adbg_flag == ON) && (Adbg_reg & 0x01))   // Trace channel adapter activities ?
                   fprintf(A_trace, "OUTCWAR %04X, CW %02X%02X %02X%02X\n\r",
                        outcwar, M[outcwar], M[outcwar+1], M[outcwar+2], M[outcwar+3]);
-               Eregs_Out[0x51] = Eregs_Out[0x51] + 4;
+               iob->Eregs_Out[0x51] = iob->Eregs_Out[0x51] + 4;
 
-               Eregs_Inp[0x5C] |= 0x0080;                // Set command register to OUT Control Word
-               Eregs_Inp[0x59]  = cacw2;                 // Load cycle steal address with data load start address
+               iob->Eregs_Inp[0x5C] |= 0x0080;           // Set command register to OUT Control Word
+               iob->Eregs_Inp[0x59]  = cacw2;            // Load cycle steal address with data load start address
                if ((Adbg_flag == ON) && (Adbg_reg & 0x01)) {   // Trace channel adapter activities ?
                   fprintf(A_trace, "CW %04X\n\r", cacw1);
                   fprintf(A_trace, "Fetch starts at %06X, count = %04X\n\r", cacw2, wdcnt);
@@ -775,9 +863,9 @@ void exec_ccw(struct IO3705 *iob) {
                wdcnttot = wdcnttot + wdcnt;              // Total byte count
                for (i = 0; i < wdcnttmp; i++) {
                   iob->buffer[bufbase + i] = M[cacw2 + i];   // Load data directly into memory
-                  Eregs_Inp[0x59] = Eregs_Inp[0x59] + 1; // Increment cycle steal counter
+                  iob->Eregs_Inp[0x59] = iob->Eregs_Inp[0x59] + 1; // Increment cycle steal counter
                   wdcnt = wdcnt - 1;                     // Decrement byte counter
-                  Eregs_Inp[0x52] = Eregs_Inp[0x52] - 1;
+                  iob->Eregs_Inp[0x52] = iob->Eregs_Inp[0x52] - 1;
                }  // End for stmt
                bufbase = bufbase + i;                    // Point after last byte stored in buffer
 
@@ -794,7 +882,7 @@ void exec_ccw(struct IO3705 *iob) {
                      Eregs_Inp[0x77] |= iob->CA_mask;    // Set CA1 L3 interrupt
                      pthread_mutex_unlock(&r77_lock);
                      CA1_IS_req_L3 = ON;                 // Chan Adap Initial Sel request flag
-                     while (Ireg_bit(0x77, 0x008) == ON)
+                     while (Ireg_bit(0x77, iob->CA_mask) == ON)
                         wait();                          // Wait for initial selection reset
                   }
                } else {
@@ -817,29 +905,30 @@ void exec_ccw(struct IO3705 *iob) {
                Eregs_Inp[0x77] |= iob->CA_mask;          // Set CA1  L3 interrupt
                pthread_mutex_unlock(&r77_lock);
                CA1_IS_req_L3 = ON;                       // Chan Adap Initial Sel request flag
-               while (Ireg_bit(0x77, 0x008) == ON)
+               while (Ireg_bit(0x77, iob->CA_mask) == ON)
                   wait();                                // Wait for initial selection reset
             }
 
             rc = send(iob->bus_socket[iob->abswitch], (void*)&iob->buffer, wdcnttot, 0);
 
             // Send CA return status to host
+            print_regs(iob, "CCW 02 Post");
             if (condition != 3) {
-               carnstat = ((Eregs_Out[0x54] >> 8 ) & 0x00FF);  // Get CA return status
+               carnstat = ((iob->Eregs_Out[0x54] >> 8 ) & 0x00FF);  // Get CA return status
                if (condition == 2)
                   carnstat = CSW_DEND;
-               send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, iob->CA_id);
+               send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, CAid);
             }
             break;
 
          case 0x03:       // NO-OP ?
-            Eregs_Inp[0x5C] |= 0x1000;                   // Set CA Command Register
+            iob->Eregs_Inp[0x5C] |= 0x1000;              // Set CA Command Register
             // Send channel end and device end to host. Sufficient for now (might need to send x00).
             while (Ireg_bit(0x77, iob->CA_mask) == ON)
                wait();                                   // Wait for CA1 L3 interrupt request reset
             carnstat = 0x00;
             carnstat |= CSW_DEND;
-            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, iob->CA_id);
+            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, CAid);
             break;
 
          case 0x04:       // Sense ?
@@ -848,22 +937,24 @@ void exec_ccw(struct IO3705 *iob) {
                carnstat = CSW_CEND | CSW_DEND | CSW_UEXC;  // set unit exception
                iob->buffer[0] = 0x00;
             } else {
-               Eregs_Inp[0x5C] |= 0x0800;                // Set CA Command Register
+               iob->Eregs_Inp[0x5C] |= 0x0800;           // Set CA Command Register
                while (Ireg_bit(0x77, iob->CA_mask) == ON)
                   wait();                                // Wait for CA1 L3 reset
+                  // ?????
                //pthread_mutex_lock(&r77_lock);
                //Eregs_Inp[0x77] |= iob->CA_mask;        // Set CA1 L3 interrupt request
                //pthread_mutex_unlock(&r77_lock);
                //CA1_IS_req_L3 = ON;                     // Chan Adap L3 request flag
                //while (Ireg_bit(0x77, iob->CA_mask) == ON)
                //   wait();                              // Wait for L3 interrupt request reset
+                  // ?????
                print_regs(iob, "CCW 04 L3");
-               iob->buffer[0] = Eregs_Out[0x53] >> 8;    // Load sense data byte 0
+               iob->buffer[0] = iob->Eregs_Out[0x53] >> 8;    // Load sense data byte 0
                if (Eregs_Out[0x57] & 0x0100)             // If not initialized
                   iob->buffer[0] |= 0x02;                // Set not initialized sense
                carnstat = 0x00;
                carnstat = CSW_CEND | CSW_DEND;
-               Eregs_Out[0x53] &= ~0x8000;
+               iob->Eregs_Out[0x53] &= ~0x8000;
             }
             if ((Adbg_flag == ON) && (Adbg_reg & 0x01))  // Trace channel adapter activities ?
                fprintf(A_trace, "CA%c: Sending sense Byte 0 %02X \n\r", iob->CA_id, iob->buffer[0]);
@@ -871,23 +962,25 @@ void exec_ccw(struct IO3705 *iob) {
             rc = send_socket(iob->bus_socket[iob->abswitch], (void*)&iob->buffer, 1);
 
             // Send CA return status to host
-            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, iob->CA_id);
+            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, CAid);
             break;
 
          case 0x05:       // IPL command
          case 0x01:       // Write
          case 0x09:       // Write Break
-            Eregs_Inp[0x53] &= 0x00FF;                   // Reset sense byte (in)
-            Eregs_Out[0x53] &= 0x00FF;                   // Reset sense byte (out)
+            if ((Adbg_flag == ON) && (Adbg_reg & 0x01))   // Trace channel adapter activities ?
+               fprintf(A_trace, "CA%d continues, CA%d not active\n\r",CAid+1,abs(CAid-1)+1);
+            iob->Eregs_Inp[0x53] &= 0x00FF;              // Reset sense byte (in)
+            iob->Eregs_Out[0x53] &= 0x00FF;                   // Reset sense byte (out)
             switch (ccw.code) {
                case 0x01:
-                  Eregs_Inp[0x5C] |= 0x4000;             // Set CA Command Register
-                  Eregs_Inp[0x55] |= 0x0100;             // Set Channel Active
+                  iob->Eregs_Inp[0x5C] |= 0x4000;        // Set CA Command Register
+                  iob->Eregs_Inp[0x55] |= 0x0100;        // Set Channel Active
                   break;
                case 0x05:
-                  Eregs_Inp[0x5C] |= 0x0001;             // Set CA Command Register
-                  Eregs_Inp[0x55] |= 0x0100;             // Set Channel Active
-                  Eregs_Out[0x55] |= 0x3000;             // Set INCWAR and OUTCWAR valid for IPL (MAXIROS doesn't do this)
+                  iob->Eregs_Inp[0x5C] |= 0x0001;        // Set CA Command Register
+                  iob->Eregs_Inp[0x55] |= 0x0100;        // Set Channel Active
+                  iob->Eregs_Out[0x55] |= 0x3000;             // Set INCWAR and OUTCWAR valid for IPL (MAXIROS doesn't do this)
                   while (Ireg_bit(0x77, iob->CA_mask) == ON)
                       wait();                            // Wait for CA1 L3 request reset
                   pthread_mutex_lock(&r77_lock);
@@ -896,15 +989,15 @@ void exec_ccw(struct IO3705 *iob) {
                   CA1_IS_req_L3 = ON;
                   break;
                case 0x09:
-                  Eregs_Inp[0x55] |= 0x0100;             // Set Channel Active
-                  Eregs_Inp[0x5C] |= 0x0200;             // Set CA Command Register
-                  Eregs_Inp[0x55] |= 0x0040;             // Set Write Break Remember flag
+                  iob->Eregs_Inp[0x55] |= 0x0100;        // Set Channel Active
+                  iob->Eregs_Inp[0x5C] |= 0x0200;        // Set CA Command Register
+                  iob->Eregs_Inp[0x55] |= 0x0040;        // Set Write Break Remember flag
                   break;
             }  // End of nested switch ccw.code
 
             while (Ireg_bit(0x77, iob->CA_mask) == ON)
                 wait();                                  // Wait for CA1 L3 Request reset
-            print_regs(iob, "CCW 05, 09, 01 Pre");
+            print_regs(iob, "CCW 05, 09, 01 Entry");
 
             // Read data from host, but first make sure host has finished writing all data to the TCP buffer
             pendingrcv = 0;
@@ -920,7 +1013,7 @@ void exec_ccw(struct IO3705 *iob) {
                   fprintf(A_trace, "CA%c: data chaining \n\r", iob->CA_id);
                carnstat = CSW_CEND | CSW_DEND;   // Set CA return status
                // Send CA return status to host
-               send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, iob->CA_id);
+               send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, CAid);
                return;
             }
             bufbase = 0;                                 // Set buffer base.
@@ -937,25 +1030,25 @@ void exec_ccw(struct IO3705 *iob) {
                do {   // While condition remains 0
                   condition = 1;
                   if ((Adbg_flag == ON) && (Adbg_reg & 0x01))   // Trace channel adapter activities ?
-                     fprintf(A_trace, "InpReg 55 %04X, OutReg 55 %04X\n\r", Eregs_Inp[0x55], Eregs_Out[0x55]);
-                  while (reg_bit(0x55, 0x2000) == OFF)   // Wait for INCWAR to become valid
+                     fprintf(A_trace, "InpReg 55 %04X, OutReg 55 %04X\n\r", iob->Eregs_Inp[0x55], iob->Eregs_Out[0x55]);
+                  while (Oreg_bit(0x55, 0x2000,CAid) == OFF)    // Wait for INCWAR to become valid
                      wait();
 
-                  incwar = Eregs_Out[0x50];
+                  incwar = iob->Eregs_Out[0x50];
                   cacw1 = (M[incwar] << 8) | M[incwar+1] & 0x00FF;  // Get first half of CA Control word
                   if ((cacw1 & 0x1000) == 0x0000) {      // If chain bit is off...
-                     Eregs_Inp[0x55] &= ~0x2000;         // ...reset INCWAR valid latch...
-                     Eregs_Out[0x55] &= ~0x2000;         // ...in both IN and OUT reg
+                     iob->Eregs_Inp[0x55] &= ~0x2000;    // ...reset INCWAR valid latch...
+                     //iob->Eregs_Out[0x55] &= ~0x2000;         // ...in both IN and OUT reg
                   }
                   if (cacw1 & 0x2000)                    // If zero override bit is on...
-                     Eregs_Inp[0x55] |= 0x4000;          // ...set zero override register flag
+                     iob->Eregs_Inp[0x55] |= 0x4000;     // ...set zero override register flag
                   else                                   // else...
-                     Eregs_Inp[0x55] &= ~0x4000;         // ...clear zero override bit
+                     iob->Eregs_Inp[0x55] &= ~0x4000;    // ...clear zero override bit
 
                   if (cacw1 & 0x1000)                    // If chain flag is on...
-                     Eregs_Inp[0x55] |= 0x2000;          // ...set INCWAR valid register flag
+                     iob->Eregs_Inp[0x55] |= 0x2000;     // ...set INCWAR valid register flag
                   else                                   // else...
-                     Eregs_Inp[0x55] &= ~0x2000;         // ...clear INCWAR valid bit
+                     iob->Eregs_Inp[0x55] &= ~0x2000;    // ...clear INCWAR valid bit
 
                   wdcnt = 0x0000;                        // clear count
                   wdcnt = (cacw1 >> 2) & 0x03FF;         // Load Counter
@@ -964,10 +1057,10 @@ void exec_ccw(struct IO3705 *iob) {
                   cacw2 = ((M[incwar+1] & 0x0003) << 16) + (M[incwar+2] << 8) + (M[incwar+3] & 0x00FF);
                   if ((Adbg_flag == ON) && (Adbg_reg & 0x01))   // Trace channel adapter activities ?
                      fprintf(A_trace, "INCWAR %04X, CW %02X%02X %02X%02X\n\r", incwar, M[incwar], M[incwar+1], M[incwar+2], M[incwar+3]);
-                  Eregs_Out[0x50] = Eregs_Out[0x50] + 4;
+                  iob->Eregs_Out[0x50] = iob->Eregs_Out[0x50] + 4;
 
-                  Eregs_Inp[0x5C] |= 0x0020;             // Set command register to IN Control Word
-                  Eregs_Inp[0x59] = cacw2;               // Load cycle steal address with data load start address
+                  iob->Eregs_Inp[0x5C] |= 0x0020;        // Set command register to IN Control Word
+                  iob->Eregs_Inp[0x59] = cacw2;          // Load cycle steal address with data load start address
                   if ((Adbg_flag == ON) && (Adbg_reg & 0x01)) {   // Trace channel adapter activities ?
                      fprintf(A_trace, "CW %04X\n\r", cacw1);
                      fprintf(A_trace, "Load starts at %06X, count=%04X\n\r", cacw2, wdcnt);
@@ -978,7 +1071,7 @@ void exec_ccw(struct IO3705 *iob) {
 
                   for (i = 0; i < wdcnttmp; i++) {
                      M[cacw2 + i] = iob->chainbuf[bufbase + i];  // Load data directly into memory
-                     Eregs_Inp[0x59] = Eregs_Inp[0x59] + 1;  // Increment cycle steal counter
+                     iob->Eregs_Inp[0x59] = iob->Eregs_Inp[0x59] + 1; // Increment cycle steal counter
                      wdcnt = wdcnt - 1;                      // Decrement byte counter
                   }  // End For
                   iob->bufferl = iob->bufferl - wdcnttmp;
@@ -1011,8 +1104,8 @@ void exec_ccw(struct IO3705 *iob) {
             // we will send a L3 interrupt to to CCU, otherwise...
             // ...we will countinue loading data. In case of chaining, we will fetch a new CW
 
-            Eregs_Inp[0x52] &= 0x0000;                   // Clear Byte Count Register
-            Eregs_Inp[0x52] = wdcnt;                     // Load Register with Byte count
+            iob->Eregs_Inp[0x52] &= 0x0000;              // Clear Byte Count Register
+            iob->Eregs_Inp[0x52] = wdcnt;                // Load Register with Byte count
             while (Ireg_bit(0x77, iob->CA_mask) == ON)
                wait();                                   // Wait for L3 interrupt reset
 
@@ -1023,13 +1116,13 @@ void exec_ccw(struct IO3705 *iob) {
            //<-   ((ccw.code == 0x01) && !(Eregs_Inp[0x55] & 0x4000) && (wdcnt != 0))) {
            //? if (ccw.flags & 0x40)  {
             if (wdcnt != 0)  {
-               Eregs_Inp[0x55] |= 0x0020;                // Set channel stop
+               iob->Eregs_Inp[0x55] |= 0x0020;           // Set channel stop
                if ((Adbg_flag == ON) && (Adbg_reg & 0x01))   // Trace channel adapter activities ?
                   fprintf(A_trace, "CA%c: Channel Stop\n\r", iob->CA_id);
             }
-            Eregs_Inp[0x55] &= ~0x4000;                  // Reset zero override flag
+            iob->Eregs_Inp[0x55] &= ~0x4000;             // Reset zero override flag
           //<- }
-            if (Eregs_Inp[0x55] & 0x4000)  {             // if Zero Count Override
+            if (iob->Eregs_Inp[0x55] & 0x4000)  {             // if Zero Count Override
                if ((Adbg_flag == ON) && (Adbg_reg & 0x01))    // Trace channel adapter activities ?
                   fprintf(A_trace, "CA%c: Zero Override on\n\r", iob->CA_id);
             } // End if Eregs_Inp[0x55]
@@ -1044,9 +1137,9 @@ void exec_ccw(struct IO3705 *iob) {
                wait();                                   // Wait for CA1 L3 Request reset
             print_regs(iob, "CCW 05, 09, 01 Post");
             if (condition != 2) {                        // If Zero overide is on
-               carnstat = ((Eregs_Out[0x54] >> 8 ) & 0x00FF);   // Get CA return status
+               carnstat = ((iob->Eregs_Out[0x54] >> 8 ) & 0x00FF);   // Get CA return status
                // Send CA return status to host
-               send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, iob->CA_id);
+               send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, CAid);
             }
             break;
 
@@ -1060,10 +1153,14 @@ void exec_ccw(struct IO3705 *iob) {
          case 0xA3:         // Discontact
          case 0xC3:         // Contact
 
-            Eregs_Inp[0x55] |= 0x0100;                   // Set Channel Active
-            Eregs_Inp[0x5C] |= 0x0008;                   // Set non-standard command in CA Command Register
-            Eregs_Inp[0x53] &= 0x00FF;                   // Reset sense byte (in)
-            Eregs_Out[0x53] &= 0x00FF;                   // Reset sense byte (out)
+            print_regs(iob, "CCW's 31,32, etc Entry");
+            if ((Adbg_flag == ON) && (Adbg_reg & 0x01))   // Trace channel adapter activities ?
+               fprintf(A_trace, "CA%d continues, CA%d not active\n\r",CAid+1,abs(CAid-1)+1);
+
+            iob->Eregs_Inp[0x55] |= 0x0100;              // Set Channel Active
+            iob->Eregs_Inp[0x5C] |= 0x0008;              // Set non-standard command in CA Command Register
+            iob->Eregs_Inp[0x53] &= 0x00FF;              // Reset sense byte (in)
+            iob->Eregs_Out[0x53] &= 0x00FF;                   // Reset sense byte (out)
 
             while (Ireg_bit(0x77, iob->CA_mask) == ON)
                wait();                                   // Wait for CA1 L3 interrupt request reset
@@ -1073,10 +1170,10 @@ void exec_ccw(struct IO3705 *iob) {
             CA1_IS_req_L3 = ON;                          // Chan Adap L3 interrupt request flag
             while (Ireg_bit(0x77, iob->CA_mask) == ON)
                wait();                                   // Wait for L3 iterrupt request reset
-            print_regs(iob, "CCW's 31, 32, etc");
+            print_regs(iob, "CCW's 31, 32, etc Post");
             // Send CA return status to host
-            carnstat = ((Eregs_Out[0x54] >> 8 ) & 0x00FF); // Get CA return status
-            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, iob->CA_id);
+            carnstat = ((iob->Eregs_Out[0x54] >> 8 ) & 0x00FF); // Get CA return status
+            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, CAid);
             break;
 
          default:       // Send command reject sense
@@ -1084,7 +1181,7 @@ void exec_ccw(struct IO3705 *iob) {
             //if (debug_reg & 0x80)
             //   printf("CA%c: Sending sense Byte 0 %02X \n\r", iob->CA_id, iob->buffer[0]);
             //Eregs_Out[0x53] = ((SENSE_CR << 8));           // Set sense byte
-              Eregs_Out[0x53] = 0x8200;                      // Set sense byte
+              iob->Eregs_Out[0x53] = 0x8200;                 // Set sense byte
 
             //rc = send_socket(iob->bus_socket[iob->abswitch], (void*)&iob->buffer, 1);
             // Wait for the ACK from the host
@@ -1092,7 +1189,7 @@ void exec_ccw(struct IO3705 *iob) {
 
             // Send CA return status to host
             carnstat = CSW_CEND + CSW_DEND + CSW_UCHK;   // Get CA return status
-            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, iob->CA_id);
+            send_carnstat(iob->bus_socket[iob->abswitch], &carnstat, &ackbuf, CAid);
             break;
 
       }  // End of switch (ccw.code)
@@ -1105,8 +1202,8 @@ void exec_ccw(struct IO3705 *iob) {
 // This subroutine test for 1 bit in a External Output reg.
 // If '0' OFF is returned, if 1 'ON' returned.
 // ************************************************************
-int reg_bit(int reg, int bit_mask) {
-   if ((Eregs_Out[reg] & bit_mask) == 0x00)
+int Oreg_bit(int reg, int bit_mask,int CAid) {
+   if ((iobs[CAid]->Eregs_Out[reg] & bit_mask) == 0x00)
       return(OFF);
    else
       return(ON);

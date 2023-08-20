@@ -231,6 +231,7 @@ int32 debug_reg = 0x00;                                 /* Bit flags for debug/t
 int32 debug_flag = OFF;                                 /* 1 when trace.log open */
 FILE  *trace;
 int   tbar;                                             /* ICW table pointer */
+int   CAid = 0;                                         /* Selected Channel Adapter */
 int32 cc = 1;
 int32 val[4] = { 0x00, 0x00, 0x00, 0x00 };              /* Used for printing mnem */
 
@@ -746,8 +747,8 @@ while (reason == 0) {                          /* Loop until halted */
          else
             GR[0][Grp] = GR[0][Grp] + Tfld;
          PC = GR[0][Grp];                      /* Update PC with new IAR */
+         if (Tfld == 0)  usleep(1000);         /* delay if branch 0      */
          break;
-
       case (0x9800):
          /* BCL  T              [RT]  */
          /* 01234567 89012345
@@ -1997,22 +1998,25 @@ while (reason == 0) {                          /* Loop until halted */
                   icw_pdf_reg = EMPTY;
             }
             if (Efld == 0x50) {                     // Get INCWAR ?
-               Eregs_Inp[0x50] = Eregs_Out[0x50];   // Load INCWAR as used by CA
+               iobs[CAid]->Eregs_Inp[0x50] = iobs[CAid]->Eregs_Out[0x50];   // Load INCWAR as used by CA
             }
             if (Efld == 0x51) {                     // Get OUTCWAR ?
-               Eregs_Inp[0x51] = Eregs_Out[0x51];   // Load OUTCWAR as used by CA
+               iobs[CAid]->Eregs_Inp[0x51] = iobs[CAid]->Eregs_Out[0x51];   // Load OUTCWAR as used by CA
             }
             if (Efld == 0x59) {                     // Get Cycle Steal Address Register ?
-               if (Eregs_Inp[0x59] & 0x10000) {     // if X-bit 7 on ...
-                  Eregs_Inp[0x58] |= 0x0001;        // ... set this in Channel Bus Out Register
+               if (iobs[CAid]->Eregs_Inp[0x59] & 0x10000) {     // if X-bit 7 on ...
+                  iobs[CAid]->Eregs_Inp[0x58] |= 0x0001;        // ... set this in Channel Bus Out Register
                } else {                             // if X-bit 6 not on ...
-                  Eregs_Inp[0x58] &= ~0x0001;       // ... reset this in Channel Bus Out Register
+                  iobs[CAid]->Eregs_Inp[0x58] &= ~0x0001;       // ... reset this in Channel Bus Out Register
                }
-               if (Eregs_Inp[0x59] & 0x20000) {     // if X-bit 6 on ...
-                  Eregs_Inp[0x58] |= 0x0002;        // ... set this in Channel Bus Out Register
+               if (iobs[CAid]->Eregs_Inp[0x59] & 0x20000) {     // if X-bit 6 on ...
+                  iobs[CAid]->Eregs_Inp[0x58] |= 0x0002;        // ... set this in Channel Bus Out Register
                } else {                             // if X-bit 6 not on ...
-                  Eregs_Inp[0x58] &= ~0x0002;       // ... reset this in Channel Bus Out Register
+                  iobs[CAid]->Eregs_Inp[0x58] &= ~0x0002;       // ... reset this in Channel Bus Out Register
                }
+            }
+            if ((Efld >= 0x50) && (Efld <= 0x5F)) {              // Channel Adapter Register ? ...
+               Eregs_Inp[Efld] = iobs[CAid]->Eregs_Inp[Efld];    // ...Copy to CCU register
             }
 
 // ***      Eregs_Inp[0x71] is updated by panel.c
@@ -2131,42 +2135,66 @@ while (reason == 0) {                          /* Loop until halted */
             //********************************************************
             //          Channel Adaptor Type 2 updates
             //********************************************************
-            if (Efld == 0x53) {                // Channel Adapter Sense
-               if (Eregs_Out[0x53] & 0xFFFF)   // If any bit set...
-                  Eregs_Out[0x54] |= 0x0100;   // ...set Unit Check
+            if ((Efld >= 0x50) && (Efld <= 0x5C)) // Channel Adapter Register?
+              iobs[CAid]->Eregs_Out[Efld] = GR[Rfld][Grp];    //Copy to CA register
+
+            if (Efld == 0x53) {                               // Channel Adapter Sense
+               if (iobs[CAid]->Eregs_Out[0x53] & 0xFFFF)      // If any bit set...
+                  iobs[CAid]->Eregs_Out[0x54] |= 0x0100;      // ...set Unit Check
             }
-            if (Efld == 0x56) {                // Channel Adapter Mode
-               if (Eregs_Out[0x56] & 0x2000) {
-                  Eregs_Inp[0x55] &= ~0x2000;  // Reset INCWAR valid
-                  Eregs_Out[0x55] &= ~0x2000;  // Reset INCWAR valid
+            if (Efld == 0x55) {                               // Channel Adapter Control Register (CACR)
+               if (iobs[CAid]->Eregs_Out[0x55] & 0x2000)
+                  iobs[CAid]->Eregs_Inp[0x55] |= 0x2000;      // Set INCWAR valid in IN
+               if (iobs[CAid]->Eregs_Out[0x55] & 0x1000)
+                  iobs[CAid]->Eregs_Inp[0x55] |= 0x1000;      // Set OUTCWAR valid in IN
+               }
+            if (Efld == 0x56) {                               // Reset Channel Adapter Control Register
+               if (iobs[CAid]->Eregs_Out[0x56] & 0x2000) {
+                  iobs[CAid]->Eregs_Inp[0x55] &= ~0x2000;     // Reset INCWAR valid
+                  iobs[CAid]->Eregs_Out[0x55] &= ~0x2000;     // Reset INCWAR valid
+                  iobs[CAid]->Eregs_Out[0x56] &= ~0x2000;     // Clear Reset INCWAR bit
                   }
-               if (Eregs_Out[0x56] & 0x1000) {
-                  Eregs_Inp[0x55] &= ~0x1000;  // Reset OUTCWAR valid
-                  Eregs_Out[0x55] &= ~0x1000;  // Reset OUTCWAR valid
+               if (iobs[CAid]->Eregs_Out[0x56] & 0x1000) {
+                  iobs[CAid]->Eregs_Inp[0x55] &= ~0x1000;     // Reset OUTCWAR valid
+                  iobs[CAid]->Eregs_Out[0x55] &= ~0x1000;     // Reset OUTCWAR valid
+                  iobs[CAid]->Eregs_Out[0x56] &= ~0x1000;     // Clear Reset OUTCWAR bit
                   }
                }
 
-            if (Efld == 0x57) {                // Channel Adapter Mode
-               if (Eregs_Out[0x57] & 0x0010) { // Reset CA L3 interrupt
+            if (Efld == 0x57) {                   // Channel Adapter Mode
+               Eregs_Out[Efld] = GR[Rfld][Grp];   // This is a shared register
+               if (Eregs_Out[0x57] & 0x0010) {    // Reset CA L3 interrupt
                   pthread_mutex_lock(&r77_lock);
-                  Eregs_Inp[0x77] &= ~0x0028;  // Reset CA L3  interrupt
+                  if (Eregs_Out[0x57] & 0x0008)   // Determine which CA is selected
+                     Eregs_Inp[0x77] &= ~0x0008;  // Reset CA L3  interrupt for CA1
+                  else
+                     Eregs_Inp[0x77] &= ~0x0020;  // Reset CA L3  interrupt for CA2
                   pthread_mutex_unlock(&r77_lock);
-                  CA1_IS_req_L3 = OFF;
-                  CA1_DS_req_L3 = OFF;
+                  if (!(Eregs_Inp[0x77] & 0x0028)) {  // Reset L3 if no L3 interrupt flagged
+                     CA1_IS_req_L3 = OFF;
+                     CA1_DS_req_L3 = OFF;
+                  }
                }
                if (Eregs_Out[0x57] & 0x0020) { // Reset CA L1 interrupt
                   Eregs_Inp[0x76] &= ~0x0400;  // Reset CA L1  interrupt
                }
-               if (Eregs_Out[0x57] & 0x0008) { // Test for CA select
-                  Eregs_Inp[0x55] |= 0x0001;   // Select CA1
-                  Eregs_Inp[0x55] &= ~0x0002;  // deselect CA2
+               if (Eregs_Out[0x57] & 0x0008) {          // Test for CA select
+                  CAid = 0;                             // Select CA 1
+                  iobs[0]->Eregs_Inp[0x55] |= 0x0001;   // Select CA1
+                  iobs[0]->Eregs_Inp[0x55] &= ~0x0002;  // deselect CA2
+                  iobs[1]->Eregs_Inp[0x55] |= 0x0001;   // Select CA1
+                  iobs[1]->Eregs_Inp[0x55] &= ~0x0002;  // deselect CA2
                }  else {
-                  Eregs_Inp[0x55] |= 0x0002;   // Select CA2
-                  Eregs_Inp[0x55] &= ~0x0001;  // deselect CA1
+                  CAid = 1;                             // Select CA 2
+                  iobs[0]->Eregs_Inp[0x55] |= 0x0002;   // Select CA2
+                  iobs[0]->Eregs_Inp[0x55] &= ~0x0001;  // deselect CA1
+                  iobs[1]->Eregs_Inp[0x55] |= 0x0002;   // Select CA2
+                  iobs[1]->Eregs_Inp[0x55] &= ~0x0001;  // deselect CA1
                }
-               if (Eregs_Out[0x57] & 0x0100) { // Test for IPL required
-                  Eregs_Inp[0x53] |= 0x0200;   // Set not initialized sense
-                  Eregs_Out[0x53] |= 0x0200;   // Set not initialized sense
+               if (Eregs_Out[0x57] & 0x0100) {          // Test for IPL required
+                  iobs[0]->Eregs_Inp[0x53] |= 0x0200;   // Set not initialized sense
+                  iobs[1]->Eregs_Inp[0x53] |= 0x0200;   // Set not initialized sense
+                  iobs[CAid]->Eregs_Out[0x53] |= 0x0200;            // Set not initialized sense
                }
                if (Eregs_Out[0x57] & 0x0200) { // Test for IPL unit exception
                   if (Eregs_Out[0x57] & 0x0008)
@@ -2181,26 +2209,26 @@ while (reason == 0) {                          /* Loop until halted */
                      iobs[1]->IPL_exception = OFF;
                }
                if (Eregs_Out[0x57] & 0x0004) {
-                  Eregs_Inp[0x55] &= ~0x0010;  // Reset reset flag
+                  iobs[CAid]->Eregs_Inp[0x55] &= ~0x0010;  // Reset reset flag
                }
                if (Eregs_Out[0x57] & 0x0002) {
-                  Eregs_Inp[0x55] &= ~0x0020;  // Reset channel stop
+                  iobs[CAid]->Eregs_Inp[0x55] &= ~0x0020;  // Reset channel stop
                }
-               if  ((Eregs_Out[0x57] & 0x0800) &&    // If Unit Exception latch on and ...
-                   ((Eregs_Out[0x57] & 0x0100) ||    //  not initialized or...
-                    (Eregs_Out[0x57] & 0x0001))) {   // in diagnostic mode
-                  Eregs_Inp[0x54] |= 0x0200;         // Set Unit Check latch
+               if  ((Eregs_Out[0x57] & 0x0800) &&          // If Unit Exception latch on and ...
+                   ((Eregs_Out[0x57] & 0x0100) ||          //  not initialized or...
+                    (Eregs_Out[0x57] & 0x0001))) {         // in diagnostic mode
+                  iobs[CAid]->Eregs_Inp[0x54] |= 0x0200;  // Set Unit Check latch
                }
-               if ((Eregs_Out[0x57] & 0x0001) &&
-                  !(Eregs_Inp[0x55] & 0x8000))  {
-                  Eregs_Inp[0x55] |= 0x8000;         // Diagnostic wrap mode on
-                  Eregs_Inp[0x55] &= ~0x0100;        // CA not active
-               }
-               if (!(Eregs_Out[0x57] & 0x0001) &&
-                  (Eregs_Inp[0x55] & 0x8000))  {
-                  Eregs_Inp[0x55] &= ~0x8000;        // Diagnostic wrap mode off
-                  Eregs_Inp[0x55] |= 0x0100;         // CA active
-               }
+               //if ((Eregs_Out[0x57] & 0x0001) &&
+               //   !(Eregs_Inp[0x55] & 0x8000))  {
+               //   iobs[CAid]->Eregs_Inp[0x55] |= 0x8000;   // Diagnostic wrap mode on
+               //   iobs[CAid]->Eregs_Inp[0x55] &= ~0x0100;  // CA not active
+               //}
+               //if (!(Eregs_Out[0x57] & 0x0001) &&
+               //   (Eregs_Inp[0x55] & 0x8000))  {
+               //   iobs[CAid]->Eregs_Inp[0x55] &= ~0x8000; // Diagnostic wrap mode off
+               //   iobs[CAid]->Eregs_Inp[0x55] |= 0x0100;  // CA active
+               //}
             }
 
             //********************************************************
@@ -2246,7 +2274,7 @@ while (reason == 0) {                          /* Loop until halted */
             if (Efld == 0x77) {                // Miscellaneous Control
                w_byte = Eregs_Out[Efld];
                if (w_byte & 0x8000)  {         // Reset IPL L1 ?
-                  Eregs_Inp[0x53] &= ~0x0200;  // Reset not-initialized flag
+                  iobs[CAid]->Eregs_Inp[0x53] &= ~0x0200;  // Reset not-initialized flag
                   ipl_req_L1 = OFF;
                }
                if (w_byte & 0x0004)            // Reset all L1 prgm checks
